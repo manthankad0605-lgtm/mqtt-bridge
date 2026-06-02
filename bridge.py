@@ -159,7 +159,7 @@ def on_disconnect(client, userdata, rc):
 def main():
     init_supabase()
 
-    client = mqtt.Client(client_id="railway-bridge-01", protocol=mqtt.MQTTv311)
+    client = mqtt.Client(client_id=f"railway-bridge-{int(time.time())}", protocol=mqtt.MQTTv311)
     client.username_pw_set(USERNAME, PASSWORD)
     client.tls_set_context(ssl.create_default_context())
     client.on_connect    = on_connect

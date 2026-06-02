@@ -202,17 +202,20 @@ def init_supabase():
     log.info("Supabase client ready → %s", SUPABASE_URL)
 
 def insert_row(regs):
-    """Apply scaling and insert one row into sensor_data."""
-    row = {"recorded_at": datetime.now(timezone.utc).isoformat()}
+    """Upsert one row per minute — safe against duplicate Railway instances."""
+    # Truncate to the minute so every instance uses identical timestamp key
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    row = {"recorded_at": now.isoformat()}
     for i, col in enumerate(COLUMNS):
-        scale = SCALE.get(i, 1)
-        row[col] = round(regs[i] / scale, 4) if scale != 1 else int(regs[i])
+        s = SCALE.get(i, 1)
+        row[col] = round(regs[i] / s, 4) if s != 1 else int(regs[i])
     try:
-        supabase.table("sensor_data").insert(row).execute()
-        log.info("✓ Row inserted | flow_temp=%.2f  return_temp=%.2f  power=%.2f",
+        # upsert: if a row with same recorded_at exists, update it — no duplicates ever
+        supabase.table("sensor_data").upsert(row, on_conflict="recorded_at").execute()
+        log.info("✓ Row upserted | flow_temp=%.2f  return_temp=%.2f  power=%.2f",
                  row["flow_temp"], row["return_temp"], row["power"])
     except Exception as e:
-        log.error("✗ Insert failed: %s", e)
+        log.error("✗ Upsert failed: %s", e)
 
 # ── MQTT callbacks ────────────────────────────────────────────────────────────
 def on_connect(client, userdata, flags, rc):
@@ -234,11 +237,14 @@ def on_message(client, userdata, msg):
 
         last_payload = regs   # always keep latest
 
-        # Insert once per minute
+        # Insert once per minute — strict 60s gap check
         now = time.time()
-        if now - last_insert >= 60:
+        elapsed = now - last_insert
+        if elapsed >= 60:
             insert_row(last_payload)
             last_insert = now
+        else:
+            log.debug("Skipping insert — only %.1fs since last insert", elapsed)
 
     except json.JSONDecodeError as e:
         log.error("JSON error: %s", e)

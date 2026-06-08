@@ -1,12 +1,13 @@
 """
 Railway MQTT → Supabase Bridge  (Multi-Device Edition)
 =======================================================
+Compatible with paho-mqtt 1.x AND 2.x
 Listens on  rs485/sensors/1  rs485/sensors/2  rs485/sensors/3
 Inserts each frame into Supabase with the correct device_id.
 
 Requirements (pip install):
-  paho-mqtt==2.1.0
-  supabase==2.3.4
+  paho-mqtt
+  supabase
   python-dotenv
 
 Environment variables (set in Railway → Variables):
@@ -18,10 +19,10 @@ Environment variables (set in Railway → Variables):
   SB_KEY          <your supabase service_role or anon key>
 """
 
-import os, json, logging, time
+import os, json, logging, time, ssl
 from datetime import datetime, timezone
+
 import paho.mqtt.client as mqtt
-from paho.mqtt.enums import CallbackAPIVersion
 from supabase import create_client, Client
 
 logging.basicConfig(
@@ -36,16 +37,16 @@ HIVEMQ_PORT = int(os.environ.get("HIVEMQ_PORT", 8883))
 MQTT_USER   = os.environ.get("MQTT_USER", "Modbus_sniffer")
 MQTT_PASS   = os.environ.get("MQTT_PASS", "Admin123")
 SB_URL      = os.environ.get("SB_URL", "https://bfzufsnqvjtmzvjdmoyu.supabase.co")
-SB_KEY      = os.environ.get("SB_KEY", "")   # set in Railway env vars
+SB_KEY      = os.environ.get("SB_KEY", "")
 
-# Subscribe to all three device topics
 MQTT_TOPICS = [
     ("rs485/sensors/1", 1),
     ("rs485/sensors/2", 1),
     ("rs485/sensors/3", 1),
+    ("rs485/sensors",   1),   # legacy fallback → routes to device 1
 ]
 
-# ── Column names (120 registers, matches DB columns) ──────────
+# ── Column names (120 registers) ─────────────────────────────
 DB_COLS = [
     'pump_1','pump_2','pump_3','pump_4','pump_5','pump_6','pump_7','pump_8','pump_9','pump_10',
     'comp_1','comp_2','comp_3','comp_4','comp_5','comp_6','comp_7','comp_8','comp_9','comp_10',
@@ -74,48 +75,53 @@ DB_COLS = [
 sb: Client = create_client(SB_URL, SB_KEY)
 
 def topic_to_device_id(topic: str) -> int:
-    """Extract device number from topic like rs485/sensors/2  →  2"""
     try:
         return int(topic.split("/")[-1])
     except (ValueError, IndexError):
-        return 1  # fallback
+        return 1
 
-def insert_frame(device_id: int, registers: list, ts: str | None):
+def insert_frame(device_id: int, registers: list, ts):
     if len(registers) != 120:
         log.warning("Expected 120 registers, got %d — skipping", len(registers))
         return
-
     row = {
         "device_id":   device_id,
         "recorded_at": ts or datetime.now(timezone.utc).isoformat(),
     }
     for i, col in enumerate(DB_COLS):
         row[col] = int(registers[i])
-
     try:
         sb.table("sensor_data").insert(row).execute()
         log.info("Device %d → inserted @ %s", device_id, row["recorded_at"])
     except Exception as exc:
         log.error("Supabase insert error (device %d): %s", device_id, exc)
 
-# ── MQTT callbacks ────────────────────────────────────────────
-def on_connect(client, userdata, flags, reason_code, properties):
-    if reason_code == 0:
+# ── MQTT callbacks (paho v1 style — no CallbackAPIVersion) ───
+def on_connect(client, userdata, flags, rc):
+    if rc == 0:
         log.info("MQTT connected")
         client.subscribe(MQTT_TOPICS)
-        log.info("Subscribed: %s", [t for t, _ in MQTT_TOPICS])
+        log.info("Subscribed to %d topics", len(MQTT_TOPICS))
     else:
-        log.error("MQTT connect failed, reason=%s", reason_code)
+        log.error("MQTT connect failed, rc=%d", rc)
 
-def on_disconnect(client, userdata, flags, reason_code, properties):
-    log.warning("MQTT disconnected (%s) — will reconnect", reason_code)
+def on_disconnect(client, userdata, rc):
+    log.warning("MQTT disconnected (rc=%d) — reconnecting in 5s", rc)
+    time.sleep(5)
+    try:
+        client.reconnect()
+    except Exception as e:
+        log.error("Reconnect failed: %s", e)
 
 def on_message(client, userdata, msg):
     try:
-        payload = json.loads(msg.payload.decode())
+        payload  = json.loads(msg.payload.decode())
         registers = payload.get("r", [])
         ts        = payload.get("ts", None)
         device_id = topic_to_device_id(msg.topic)
+        # payload may carry an explicit device_id override
+        if "device_id" in payload:
+            device_id = int(payload["device_id"])
         insert_frame(device_id, registers, ts)
     except json.JSONDecodeError as exc:
         log.warning("JSON parse error on topic %s: %s", msg.topic, exc)
@@ -123,12 +129,11 @@ def on_message(client, userdata, msg):
 # ── Main ──────────────────────────────────────────────────────
 def main():
     client = mqtt.Client(
-        callback_api_version=CallbackAPIVersion.VERSION2,
         client_id=f"railway-bridge-{int(time.time())}",
-        protocol=mqtt.MQTTv5,
+        protocol=mqtt.MQTTv311,
     )
     client.username_pw_set(MQTT_USER, MQTT_PASS)
-    client.tls_set()  # uses system CA bundle for HiveMQ cloud TLS
+    client.tls_set(cert_reqs=ssl.CERT_REQUIRED, tls_version=ssl.PROTOCOL_TLS)
 
     client.on_connect    = on_connect
     client.on_disconnect = on_disconnect

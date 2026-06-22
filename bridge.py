@@ -1,146 +1,129 @@
 """
-Railway MQTT → Supabase Bridge  (Multi-Device Edition)
-=======================================================
-Compatible with paho-mqtt 1.x AND 2.x
-Listens on  rs485/sensors/1  rs485/sensors/2  rs485/sensors/3
-Inserts each frame into Supabase with the correct device_id.
+Railway MQTT → Supabase Bridge
+Broker : broker.emqx.io  port 1883  (plain TCP, no TLS)
+Topic  : rs485/sensor
+Payload: {"device_id": 1, "r": [v0, v1, ..., v119]}
+Table  : sensor_data  (columns: device_id, recorded_at, r1…r120)
 
-Requirements (pip install):
-  paho-mqtt
-  supabase
-  python-dotenv
-
-Environment variables (set in Railway → Variables):
-  HIVEMQ_HOST     22b764b37c7c440f9a258c375e19b6bf.s1.eu.hivemq.cloud
-  HIVEMQ_PORT     8883
-  MQTT_USER       Modbus_sniffer
-  MQTT_PASS       Admin123
-  SB_URL          https://bfzufsnqvjtmzvjdmoyu.supabase.co
-  SB_KEY          <your supabase service_role or anon key>
+Railway Variables required:
+  MQTT_HOST       broker.emqx.io          ← ADD THIS (new)
+  MQTT_PORT       1883                    ← ADD THIS (new)
+  MQTT_USER       Modbus_sniffer          ← ADD THIS (new)
+  MQTT_PASSWORD   Admin123                ← already exists
+  SB_URL          https://xxx.supabase.co ← ADD THIS (new, same value as SUPABASE_URL)
+  SB_KEY          <service_role key>      ← already exists
 """
 
-import os, json, logging, time, ssl
+import os
+import json
+import time
+import logging
 from datetime import datetime, timezone
 
 import paho.mqtt.client as mqtt
-from supabase import create_client, Client
+from supabase import create_client
 
+# ─── Logging ───────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
+    format="%(asctime)s  %(levelname)-8s  %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger(__name__)
 
-# ── Config ────────────────────────────────────────────────────
-HIVEMQ_HOST = os.environ.get("HIVEMQ_HOST", "22b764b37c7c440f9a258c375e19b6bf.s1.eu.hivemq.cloud")
-HIVEMQ_PORT = int(os.environ.get("HIVEMQ_PORT", 8883))
-MQTT_USER   = os.environ.get("MQTT_USER", "Modbus_sniffer")
-MQTT_PASS   = os.environ.get("MQTT_PASS", "Admin123")
-SB_URL      = os.environ.get("SB_URL", "https://bfzufsnqvjtmzvjdmoyu.supabase.co")
-SB_KEY      = os.environ.get("SB_KEY", "")
+# ─── Environment Variables ─────────────────────────────────
+# Reads existing Railway variable names where possible
+MQTT_HOST  = os.environ.get("MQTT_HOST",     "broker.emqx.io")
+MQTT_PORT  = int(os.environ.get("MQTT_PORT", 1883))
+MQTT_USER  = os.environ.get("MQTT_USER",     "Modbus_sniffer")
+MQTT_PASS  = os.environ.get("MQTT_PASSWORD", "Admin123")   # uses your existing MQTT_PASSWORD var
+MQTT_TOPIC = os.environ.get("MQTT_TOPIC",    "rs485/sensor")
 
-MQTT_TOPICS = [
-    ("rs485/sensors/1", 1),
-    ("rs485/sensors/2", 1),
-    ("rs485/sensors/3", 1),
-    ("rs485/sensors",   1),   # legacy fallback → routes to device 1
-]
+# Supabase — tries SB_URL first (new), falls back to SUPABASE_URL (existing)
+SB_URL = os.environ.get("SB_URL") or os.environ.get("SUPABASE_URL")
+# Tries SB_KEY first (existing), falls back to SUPABASE_KEY (existing duplicate)
+SB_KEY = os.environ.get("SB_KEY") or os.environ.get("SUPABASE_KEY")
 
-# ── Column names (120 registers) ─────────────────────────────
-DB_COLS = [
-    'pump_1','pump_2','pump_3','pump_4','pump_5','pump_6','pump_7','pump_8','pump_9','pump_10',
-    'comp_1','comp_2','comp_3','comp_4','comp_5','comp_6','comp_7','comp_8','comp_9','comp_10',
-    'comp_11','comp_12','comp_13','comp_14','comp_15','comp_16','comp_17','comp_18','comp_19','comp_20',
-    'flow_temp','return_temp','power','temp_1','temp_2','temp_3','flow_rate_lpm',
-    'comp_tev_sh','comp_x1','comp_start_open_ratio',
-    'comp_p_gain','comp_i_time','comp_d_time','comp_alarm','comp_superheat',
-    'comp_sat_temp','comp_pressure','comp_temp','comp_x2','comp_eev_ratio',
-    'tev1_sh','tev1_x','tev1_start_open_ratio','tev1_p_gain','tev1_i_time','tev1_d_time',
-    'tev1_alarm','tev1_superheat','tev1_sat_temp','tev1_pressure','tev1_temp','tev1_x2',
-    'tev1_eev_ratio_1','tev1_eev_ratio_2','tev1_eev_ratio_3','tev1_eev_ratio_4',
-    'tev1_eev_ratio_5','tev1_eev_ratio_6','tev1_eev_ratio_7','tev1_eev_ratio_8',
-    'tev2_sh','tev2_x','tev2_start_open_ratio','tev2_p_gain','tev2_i_time','tev2_d_time',
-    'tev2_alarm','tev2_superheat','tev2_sat_temp','tev2_pressure','tev2_temp','tev2_x2',
-    'tev2_eev_ratio_1','tev2_eev_ratio_2','tev2_eev_ratio_3','tev2_eev_ratio_4',
-    'tev2_eev_ratio_5','tev2_eev_ratio_6','tev2_eev_ratio_7','tev2_eev_ratio_8',
-    'tev3_sh','tev3_x','tev3_start_open_ratio','tev3_p_gain','tev3_i_time','tev3_d_time',
-    'tev3_alarm','tev3_superheat','tev3_sat_temp','tev3_pressure','tev3_temp','tev3_x2',
-    'tev3_eev_ratio_1','tev3_eev_ratio_2','tev3_eev_ratio_3','tev3_eev_ratio_4',
-    'tev3_eev_ratio_5','tev3_eev_ratio_6','tev3_eev_ratio_7','tev3_eev_ratio_8',
-    'tev4_subcool','tev4_sat_temp','tev4_sh','tev4_x','tev4_start_open_ratio',
-    'tev4_p_gain','tev4_i_time','tev4_d_time','tev4_alarm','tev4_eev_ratio',
-]
+if not SB_URL:
+    raise RuntimeError("Set SB_URL or SUPABASE_URL in Railway Variables")
+if not SB_KEY:
+    raise RuntimeError("Set SB_KEY or SUPABASE_KEY in Railway Variables")
+# ───────────────────────────────────────────────────────────
 
-# ── Supabase client ───────────────────────────────────────────
-sb: Client = create_client(SB_URL, SB_KEY)
+_deploy_id = os.environ.get("RAILWAY_DEPLOYMENT_ID", str(int(time.time())))
+CLIENT_ID  = f"railway-bridge-{_deploy_id}"
 
-def topic_to_device_id(topic: str) -> int:
-    try:
-        return int(topic.split("/")[-1])
-    except (ValueError, IndexError):
-        return 1
+supabase = create_client(SB_URL, SB_KEY)
 
-def insert_frame(device_id: int, registers: list, ts):
-    if len(registers) != 120:
-        log.warning("Expected 120 registers, got %d — skipping", len(registers))
-        return
+# ─── Build Supabase row ────────────────────────────────────
+def build_row(payload: dict):
+    r = payload.get("r")
+    if not isinstance(r, list) or len(r) != 120:
+        log.warning("Bad 'r' array: got %s elements", len(r) if isinstance(r, list) else "N/A")
+        return None
+
+    device_id = int(payload.get("device_id", 1))
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+
     row = {
         "device_id":   device_id,
-        "recorded_at": ts or datetime.now(timezone.utc).isoformat(),
+        "recorded_at": now.isoformat(),
     }
-    for i, col in enumerate(DB_COLS):
-        row[col] = int(registers[i])
-    try:
-        sb.table("sensor_data").insert(row).execute()
-        log.info("Device %d → inserted @ %s", device_id, row["recorded_at"])
-    except Exception as exc:
-        log.error("Supabase insert error (device %d): %s", device_id, exc)
+    for i, val in enumerate(r):
+        row[f"r{i+1}"] = val   # r[0]→r1 … r[119]→r120
 
-# ── MQTT callbacks (paho v1 style — no CallbackAPIVersion) ───
+    return row
+
+# ─── MQTT Callbacks ────────────────────────────────────────
 def on_connect(client, userdata, flags, rc):
     if rc == 0:
-        log.info("MQTT connected")
-        client.subscribe(MQTT_TOPICS)
-        log.info("Subscribed to %d topics", len(MQTT_TOPICS))
+        log.info("Connected to %s:%s", MQTT_HOST, MQTT_PORT)
+        client.subscribe(MQTT_TOPIC, qos=0)
+        log.info("Subscribed → %s", MQTT_TOPIC)
     else:
-        log.error("MQTT connect failed, rc=%d", rc)
+        log.error("Connection refused  rc=%s", rc)
 
 def on_disconnect(client, userdata, rc):
-    log.warning("MQTT disconnected (rc=%d) — reconnecting in 5s", rc)
-    time.sleep(5)
-    try:
-        client.reconnect()
-    except Exception as e:
-        log.error("Reconnect failed: %s", e)
+    log.warning("Disconnected rc=%s — will auto-reconnect", rc)
 
 def on_message(client, userdata, msg):
     try:
-        payload  = json.loads(msg.payload.decode())
-        registers = payload.get("r", [])
-        ts        = payload.get("ts", None)
-        device_id = topic_to_device_id(msg.topic)
-        # payload may carry an explicit device_id override
-        if "device_id" in payload:
-            device_id = int(payload["device_id"])
-        insert_frame(device_id, registers, ts)
-    except json.JSONDecodeError as exc:
-        log.warning("JSON parse error on topic %s: %s", msg.topic, exc)
+        payload = json.loads(msg.payload.decode("utf-8"))
+    except Exception as e:
+        log.error("JSON decode error: %s", e)
+        return
 
-# ── Main ──────────────────────────────────────────────────────
+    log.info("Received  device_id=%s  topic=%s", payload.get("device_id", "?"), msg.topic)
+
+    row = build_row(payload)
+    if row is None:
+        return
+
+    try:
+        supabase.table("sensor_data").upsert(
+            row, on_conflict="device_id,recorded_at"
+        ).execute()
+        log.info("Upserted  device_id=%s  recorded_at=%s", row["device_id"], row["recorded_at"])
+    except Exception as e:
+        log.error("Supabase upsert failed: %s", e)
+
+# ─── Main ──────────────────────────────────────────────────
 def main():
-    client = mqtt.Client(
-        client_id=f"railway-bridge-{int(time.time())}",
-        protocol=mqtt.MQTTv311,
-    )
+    log.info("Bridge starting  client_id=%s", CLIENT_ID)
+    log.info("Broker : %s:%s  (plain TCP)", MQTT_HOST, MQTT_PORT)
+    log.info("Topic  : %s", MQTT_TOPIC)
+    log.info("Supabase: %s", SB_URL)
+
+    client = mqtt.Client(client_id=CLIENT_ID, clean_session=True)
     client.username_pw_set(MQTT_USER, MQTT_PASS)
-    client.tls_set(cert_reqs=ssl.CERT_REQUIRED, tls_version=ssl.PROTOCOL_TLS)
+    # No tls_set() — broker.emqx.io:1883 is plain TCP
 
     client.on_connect    = on_connect
     client.on_disconnect = on_disconnect
     client.on_message    = on_message
 
-    log.info("Connecting to %s:%d …", HIVEMQ_HOST, HIVEMQ_PORT)
-    client.connect(HIVEMQ_HOST, HIVEMQ_PORT, keepalive=60)
+    client.reconnect_delay_set(min_delay=5, max_delay=60)
+    client.connect(MQTT_HOST, MQTT_PORT, keepalive=60)
     client.loop_forever()
 
 if __name__ == "__main__":

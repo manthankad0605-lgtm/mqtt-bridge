@@ -3,15 +3,7 @@ Railway MQTT → Supabase Bridge
 Broker : broker.emqx.io  port 1883  (plain TCP, no TLS)
 Topic  : rs485/sensor
 Payload: {"device_id": 1, "r": [v0, v1, ..., v119]}
-Table  : sensor_data  (columns: device_id, recorded_at, r1…r120)
-
-Railway Variables required:
-  MQTT_HOST       broker.emqx.io          ← ADD THIS (new)
-  MQTT_PORT       1883                    ← ADD THIS (new)
-  MQTT_USER       Modbus_sniffer          ← ADD THIS (new)
-  MQTT_PASSWORD   Admin123                ← already exists
-  SB_URL          https://xxx.supabase.co ← ADD THIS (new, same value as SUPABASE_URL)
-  SB_KEY          <service_role key>      ← already exists
+Table  : sensor_data  (exact column names mapped below)
 """
 
 import os
@@ -32,28 +24,149 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ─── Environment Variables ─────────────────────────────────
-# Reads existing Railway variable names where possible
 MQTT_HOST  = os.environ.get("MQTT_HOST",     "broker.emqx.io")
 MQTT_PORT  = int(os.environ.get("MQTT_PORT", 1883))
 MQTT_USER  = os.environ.get("MQTT_USER",     "Modbus_sniffer")
-MQTT_PASS  = os.environ.get("MQTT_PASSWORD", "Admin123")   # uses your existing MQTT_PASSWORD var
+MQTT_PASS  = os.environ.get("MQTT_PASSWORD", "Admin123")
 MQTT_TOPIC = os.environ.get("MQTT_TOPIC",    "rs485/sensor")
 
-# Supabase — tries SB_URL first (new), falls back to SUPABASE_URL (existing)
 SB_URL = os.environ.get("SB_URL") or os.environ.get("SUPABASE_URL")
-# Tries SB_KEY first (existing), falls back to SUPABASE_KEY (existing duplicate)
 SB_KEY = os.environ.get("SB_KEY") or os.environ.get("SUPABASE_KEY")
 
-if not SB_URL:
-    raise RuntimeError("Set SB_URL or SUPABASE_URL in Railway Variables")
-if not SB_KEY:
-    raise RuntimeError("Set SB_KEY or SUPABASE_KEY in Railway Variables")
+if not SB_URL: raise RuntimeError("Set SB_URL or SUPABASE_URL in Railway Variables")
+if not SB_KEY: raise RuntimeError("Set SB_KEY or SUPABASE_KEY in Railway Variables")
 # ───────────────────────────────────────────────────────────
 
 _deploy_id = os.environ.get("RAILWAY_DEPLOYMENT_ID", str(int(time.time())))
 CLIENT_ID  = f"railway-bridge-{_deploy_id}"
 
 supabase = create_client(SB_URL, SB_KEY)
+
+# ─── r[0]…r[119] → exact Supabase column names ────────────
+REGISTER_COLUMNS = [
+    "pump_1",            # r[0]
+    "pump_2",            # r[1]
+    "pump_3",            # r[2]
+    "pump_4",            # r[3]
+    "pump_5",            # r[4]
+    "pump_6",            # r[5]
+    "pump_7",            # r[6]
+    "pump_8",            # r[7]
+    "pump_9",            # r[8]
+    "pump_10",           # r[9]
+    "comp_1",            # r[10]
+    "comp_2",            # r[11]
+    "comp_3",            # r[12]
+    "comp_4",            # r[13]
+    "comp_5",            # r[14]
+    "comp_6",            # r[15]
+    "comp_7",            # r[16]
+    "comp_8",            # r[17]
+    "comp_9",            # r[18]
+    "comp_10",           # r[19]
+    "comp_11",           # r[20]
+    "comp_12",           # r[21]
+    "comp_13",           # r[22]
+    "comp_14",           # r[23]
+    "comp_15",           # r[24]
+    "comp_16",           # r[25]
+    "comp_17",           # r[26]
+    "comp_18",           # r[27]
+    "comp_19",           # r[28]
+    "comp_20",           # r[29]
+    "flow_temp",         # r[30]
+    "return_temp",       # r[31]
+    "power",             # r[32]
+    "temp_1",            # r[33]
+    "temp_2",            # r[34]
+    "temp_3",            # r[35]
+    "flow_rate_lpm",     # r[36]
+    "comp_tev_sh",       # r[37]
+    "comp_x1",           # r[38]
+    "comp_start_open_ratio", # r[39]
+    "comp_p_gain",       # r[40]
+    "comp_i_time",       # r[41]
+    "comp_d_time",       # r[42]
+    "comp_alarm",        # r[43]
+    "comp_superheat",    # r[44]
+    "comp_sat_temp",     # r[45]
+    "comp_pressure",     # r[46]
+    "comp_temp",         # r[47]
+    "comp_x2",           # r[48]
+    "comp_eev_ratio",    # r[49]
+    "tev1_sh",           # r[50]
+    "tev1_x",            # r[51]
+    "tev1_start_open_ratio", # r[52]
+    "tev1_p_gain",       # r[53]
+    "tev1_i_time",       # r[54]
+    "tev1_d_time",       # r[55]
+    "tev1_alarm",        # r[56]
+    "tev1_superheat",    # r[57]
+    "tev1_sat_temp",     # r[58]
+    "tev1_pressure",     # r[59]
+    "tev1_temp",         # r[60]
+    "tev1_x2",           # r[61]
+    "tev1_eev_ratio_1",  # r[62]
+    "tev1_eev_ratio_2",  # r[63]
+    "tev1_eev_ratio_3",  # r[64]
+    "tev1_eev_ratio_4",  # r[65]
+    "tev1_eev_ratio_5",  # r[66]
+    "tev1_eev_ratio_6",  # r[67]
+    "tev1_eev_ratio_7",  # r[68]
+    "tev1_eev_ratio_8",  # r[69]
+    "tev2_sh",           # r[70]
+    "tev2_x",            # r[71]
+    "tev2_start_open_ratio", # r[72]
+    "tev2_p_gain",       # r[73]
+    "tev2_i_time",       # r[74]
+    "tev2_d_time",       # r[75]
+    "tev2_alarm",        # r[76]
+    "tev2_superheat",    # r[77]
+    "tev2_sat_temp",     # r[78]
+    "tev2_pressure",     # r[79]
+    "tev2_temp",         # r[80]
+    "tev2_x2",           # r[81]
+    "tev2_eev_ratio_1",  # r[82]
+    "tev2_eev_ratio_2",  # r[83]
+    "tev2_eev_ratio_3",  # r[84]
+    "tev2_eev_ratio_4",  # r[85]
+    "tev2_eev_ratio_5",  # r[86]
+    "tev2_eev_ratio_6",  # r[87]
+    "tev2_eev_ratio_7",  # r[88]
+    "tev2_eev_ratio_8",  # r[89]
+    "tev3_sh",           # r[90]
+    "tev3_x",            # r[91]
+    "tev3_start_open_ratio", # r[92]
+    "tev3_p_gain",       # r[93]
+    "tev3_i_time",       # r[94]
+    "tev3_d_time",       # r[95]
+    "tev3_alarm",        # r[96]
+    "tev3_superheat",    # r[97]
+    "tev3_sat_temp",     # r[98]  ← inferred (was cut off before)
+    "tev3_pressure",     # r[99]  ← inferred
+    "tev3_temp",         # r[100] ← inferred
+    "tev3_x2",           # r[101] ← inferred
+    "tev3_eev_ratio_1",  # r[102] ← inferred
+    "tev3_eev_ratio_2",  # r[103] ← inferred
+    "tev3_eev_ratio_3",  # r[104] ← inferred
+    "tev3_eev_ratio_4",  # r[105]
+    "tev3_eev_ratio_5",  # r[106]
+    "tev3_eev_ratio_6",  # r[107]
+    "tev3_eev_ratio_7",  # r[108]
+    "tev3_eev_ratio_8",  # r[109]
+    "tev4_subcool",      # r[110]
+    "tev4_sat_temp",     # r[111]
+    "tev4_sh",           # r[112]
+    "tev4_x",            # r[113]
+    "tev4_start_open_ratio", # r[114]
+    "tev4_p_gain",       # r[115]
+    "tev4_i_time",       # r[116]
+    "tev4_d_time",       # r[117]
+    "tev4_alarm",        # r[118]
+    "tev4_eev_ratio",    # r[119]
+]
+
+assert len(REGISTER_COLUMNS) == 120, f"Column map has {len(REGISTER_COLUMNS)} entries, expected 120"
 
 # ─── Build Supabase row ────────────────────────────────────
 def build_row(payload: dict):
@@ -69,8 +182,8 @@ def build_row(payload: dict):
         "device_id":   device_id,
         "recorded_at": now.isoformat(),
     }
-    for i, val in enumerate(r):
-        row[f"r{i+1}"] = val   # r[0]→r1 … r[119]→r120
+    for i, col in enumerate(REGISTER_COLUMNS):
+        row[col] = r[i]
 
     return row
 
@@ -93,7 +206,7 @@ def on_message(client, userdata, msg):
         log.error("JSON decode error: %s", e)
         return
 
-    log.info("Received  device_id=%s  topic=%s", payload.get("device_id", "?"), msg.topic)
+    log.info("Received  device_id=%s", payload.get("device_id", "?"))
 
     row = build_row(payload)
     if row is None:
@@ -103,7 +216,8 @@ def on_message(client, userdata, msg):
         supabase.table("sensor_data").upsert(
             row, on_conflict="device_id,recorded_at"
         ).execute()
-        log.info("Upserted  device_id=%s  recorded_at=%s", row["device_id"], row["recorded_at"])
+        log.info("Upserted  device_id=%s  recorded_at=%s  pump_1=%s  tev4_eev_ratio=%s",
+                 row["device_id"], row["recorded_at"], row["pump_1"], row["tev4_eev_ratio"])
     except Exception as e:
         log.error("Supabase upsert failed: %s", e)
 
@@ -116,7 +230,6 @@ def main():
 
     client = mqtt.Client(client_id=CLIENT_ID, clean_session=True)
     client.username_pw_set(MQTT_USER, MQTT_PASS)
-    # No tls_set() — broker.emqx.io:1883 is plain TCP
 
     client.on_connect    = on_connect
     client.on_disconnect = on_disconnect
